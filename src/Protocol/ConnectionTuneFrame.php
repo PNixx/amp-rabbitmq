@@ -18,17 +18,17 @@ class ConnectionTuneFrame extends MethodFrame
     /**
      * @var int
      */
-    public $channelMax = 0;
+    public int $channelMax = 0;
 
     /**
      * @var int
      */
-    public $frameMax = 0;
+    public int $frameMax = 0;
 
     /**
      * @var int
      */
-    public $heartbeat = 0;
+    public int $heartbeat = 0;
 
     public function __construct()
     {

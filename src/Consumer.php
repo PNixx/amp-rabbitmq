@@ -12,48 +12,34 @@ declare(strict_types=1);
 
 namespace PHPinnacle\Ridge;
 
-use function Amp\asyncCall;
+use PHPinnacle\Ridge\Exception\ConsumerException;
+use function Amp\async;
 
 final class Consumer
 {
     /**
-     * @var Channel
-     */
-    private $channel;
-
-    /**
-     * @var MessageReceiver
-     */
-    private $receiver;
-
-    /**
      * @var callable[]
      * @psalm-var array<string, callable>
      */
-    private $listeners = [];
+    private array $listeners = [];
 
-    public function __construct(Channel $channel, MessageReceiver $receiver)
+    public function __construct(private readonly Channel $channel, private readonly MessageReceiver $receiver)
     {
-        $this->channel = $channel;
-        $this->receiver = $receiver;
     }
 
     public function start(): void
     {
-        $this->receiver->onMessage(
-            function (Message $message) {
-                if (!$tag = $message->consumerTag) {
-                    return;
-                }
-
-                if (!isset($this->listeners[$tag])) {
-                    return;
-                }
-
-                /** @psalm-suppress MixedArgumentTypeCoercion */
-                asyncCall($this->listeners[$tag], $message, $this->channel);
+        $this->receiver->onMessage(function (Message $message) {
+            if (!$tag = $message->consumerTag) {
+                return;
             }
-        );
+
+            if (!isset($this->listeners[$tag])) {
+                throw new ConsumerException('Not listener for tag ' . $tag);
+            }
+
+            async(fn($fn) => $fn($message, $this->channel), $this->listeners[$tag]);
+        });
     }
 
     public function stop(): void

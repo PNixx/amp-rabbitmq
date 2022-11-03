@@ -26,8 +26,8 @@ final class ConnectionException extends RidgeException
         );
     }
 
-    public static function socketClosed(): self
+    public static function socketClosed(\Throwable $previous): self
     {
-        return new self('Attempting to write to a closed socket');
+        return new self('Attempting to write to a closed socket: ' . $previous->getMessage());
     }
 }

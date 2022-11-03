@@ -27,29 +27,29 @@ use Amp\Loop;
 use PHPinnacle\Ridge\Channel;
 use PHPinnacle\Ridge\Client;
 use PHPinnacle\Ridge\Message;
+use Revolt\EventLoop;
 
 require __DIR__ . '/vendor/autoload.php';
 
-Loop::run(function () {
-    $client = Client::create('amqp://user:pass@localhost:5672');
+$client = Client::create('amqp://user:pass@localhost:5672');
 
-    yield $client->connect();
+$client->connect();
 
-    /** @var Channel $channel */
-    $channel = yield $client->channel();
+$channel = $client->channel();
 
-    yield $channel->queueDeclare('queue_name');
+$queue = $channel->queueDeclare('queue_name');
 
-    for ($i = 0; $i < 10; $i++) {
-        yield $channel->publish("test_$i", '', 'queue_name');
-    }
+for ($i = 0; $i < 10; $i++) {
+    $channel->publish("test_$i", '', 'queue_name');
+}
 
-    yield $channel->consume(function (Message $message, Channel $channel) {
-        echo $message->content() . \PHP_EOL;
+$channel->consume(function (Message $message, Channel $channel) {
+    echo $message->content() . \PHP_EOL;
 
-        yield $channel->ack($message);
-    }, 'queue_name');
-});
+    $channel->ack($message);
+}, 'queue_name');
+
+EventLoop::run();
 
 ```
 

@@ -18,22 +18,22 @@ class ConnectionCloseFrame extends MethodFrame
     /**
      * @var int
      */
-    public $replyCode;
+    public int $replyCode;
 
     /**
      * @var string
      */
-    public $replyText = '';
+    public string $replyText = '';
 
     /**
      * @var int
      */
-    public $closeClassId;
+    public int $closeClassId;
 
     /**
      * @var int
      */
-    public $closeMethodId;
+    public int $closeMethodId;
 
     public function __construct()
     {

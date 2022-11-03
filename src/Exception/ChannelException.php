@@ -46,8 +46,8 @@ final class ChannelException extends RidgeException
         return new self('Consume frames order malformed.');
     }
 
-    public static function bodyOverflow(int $remaining): self
+    public static function bodyOverflow(int $remaining, string $buffer): self
     {
-        return new self(\sprintf('Body overflow, received %d more bytes.', $remaining));
+        return new self('Body overflow, received ' . $remaining . ' more bytes. Buffer: ' . $buffer);
     }
 }

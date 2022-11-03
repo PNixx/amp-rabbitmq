@@ -12,13 +12,19 @@ declare(strict_types=1);
 
 namespace PHPinnacle\Ridge;
 
+use Amp\Cancellation;
+use Amp\CancelledException;
+use Amp\CompositeCancellation;
+use Amp\DeferredCancellation;
+use Amp\DeferredFuture;
+use Amp\Future;
+use Amp\TimeoutCancellation;
 use PHPinnacle\Ridge\Exception\ChannelException;
+use PHPinnacle\Ridge\Exception\ClientException;
 use PHPinnacle\Ridge\Exception\ProtocolException;
-use function Amp\call;
-use Amp\Deferred;
-use Amp\Promise;
+use PHPinnacle\Ridge\Protocol\AbstractFrame;
 
-final class Channel
+class Channel
 {
     private const STATE_READY = 1;
     private const STATE_OPEN = 2;
@@ -33,50 +39,57 @@ final class Channel
     /** Broker sends asynchronously 'basic.ack's for delivered messages. */
     private const MODE_CONFIRM = 3;
 
+    private const AWAIT_TIMEOUT = 3;
+
     /**
      * @var int
      */
-    private $id;
+    private int $id;
 
     /**
      * @var Connection
      */
-    private $connection;
+    private Connection $connection;
 
     /**
      * @var Properties
      */
-    private $properties;
+    private Properties $properties;
 
     /**
      * @var int
      */
-    private $state = self::STATE_READY;
+    private int $state = self::STATE_READY;
 
     /**
      * @var int
      */
-    private $mode = self::MODE_REGULAR;
+    private int $mode = self::MODE_REGULAR;
 
     /**
      * @var MessageReceiver
      */
-    private $receiver;
+    private MessageReceiver $receiver;
 
     /**
      * @var Consumer
      */
-    private $consumer;
+    private Consumer $consumer;
 
     /**
      * @var Events
      */
-    private $events;
+    private Events $events;
+
+    /**
+     * @var DeferredCancellation
+     */
+    private DeferredCancellation $cancellation;
 
     /**
      * @var int
      */
-    private $deliveryTag = 0;
+    private int $deliveryTag = 0;
 
     public function __construct(int $id, Connection $connection, Properties $properties)
     {
@@ -86,6 +99,17 @@ final class Channel
         $this->receiver = new MessageReceiver($this, $connection);
         $this->consumer = new Consumer($this, $this->receiver);
         $this->events = new Events($this, $this->receiver);
+        $this->cancellation = new DeferredCancellation;
+    }
+
+    public function __destruct()
+    {
+        $this->cancellation->cancel(new ChannelException('Channel #' . $this->id . ' was closed on destruct'));
+    }
+
+    public function isClosed(): bool
+    {
+        return in_array($this->state, [self::STATE_CLOSING, self::STATE_CLOSED, self::STATE_ERROR]);
     }
 
     public function id(): int
@@ -98,824 +122,805 @@ final class Channel
         return $this->events;
     }
 
-    /**
-     * @return Promise<void>
-     *
-     * @throws \PHPinnacle\Ridge\Exception\ChannelException
-     */
-    public function open(string $outOfBand = ''): Promise
+    public function cancellation(): Cancellation
     {
-        return call(
-            function () use ($outOfBand) {
-                if ($this->state !== self::STATE_READY) {
-                    throw Exception\ChannelException::notReady($this->id);
-                }
+        return $this->cancellation->getCancellation();
+    }
 
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(5 + \strlen($outOfBand))
-                    ->appendUint16(20)
-                    ->appendUint16(10)
-                    ->appendString($outOfBand)
-                    ->appendUint8(206)
-                );
+    /**
+     * @throws Exception\ChannelException
+     */
+    public function open(string $outOfBand = ''): void
+    {
+        if ($this->state !== self::STATE_READY) {
+            throw Exception\ChannelException::notReady($this->id);
+        }
 
-                yield $this->await(Protocol\ChannelOpenOkFrame::class);
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(5 + \strlen($outOfBand))
+            ->appendUint16(20)
+            ->appendUint16(10)
+            ->appendString($outOfBand)
+            ->appendUint8(206),
+            Protocol\ChannelOpenOkFrame::class
+        );
 
-                $this->receiver->start();
-                $this->consumer->start();
+        $this->receiver->start();
+        $this->consumer->start();
 
-                $this->state = self::STATE_OPEN;
-            }
+        $this->connection->subscribe($this->id, Protocol\ChannelCloseFrame::class, function (Protocol\ChannelCloseFrame $frame) {
+            $this->state = self::STATE_CLOSED;
+            $this->connection->cancel($this->id);
+            $this->cancellation->cancel(new ChannelException('Channel #' . $this->id . ' was closed: ' . $frame->replyText));
+
+            $buffer = new Buffer;
+            $buffer
+                ->appendUint8(1)
+                ->appendUint16($this->id)
+                ->appendUint32(4)
+                ->appendUint16(20)
+                ->appendUint16(41)
+                ->appendUint8(206);
+
+            $this->connection->write($buffer);
+        });
+
+        $this->state = self::STATE_OPEN;
+    }
+
+    /**
+     * @throws Exception\ChannelException
+     */
+    public function close(int $code = 0, string $reason = ''): void
+    {
+        if ($this->state === self::STATE_CLOSED) {
+            throw Exception\ChannelException::alreadyClosed($this->id);
+        }
+
+        if ($this->state === self::STATE_CLOSING) {
+            return;
+        }
+
+        $this->state = self::STATE_CLOSING;
+
+        $this->receiver->stop();
+        $this->consumer->stop();
+        $this->cancellation->cancel(new ChannelException('Closing channel #' . $this->id));
+
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(11 + \strlen($reason))
+            ->appendUint16(20)
+            ->appendUint16(40)
+            ->appendInt16($code)
+            ->appendString($reason)
+            ->appendInt16(0)
+            ->appendInt16(0)
+            ->appendUint8(206),
+            Protocol\ChannelCloseOkFrame::class
+        );
+
+        $this->connection->cancel($this->id);
+
+        $this->state = self::STATE_CLOSED;
+    }
+
+    /**
+     * @param int $prefetchSize
+     * @param int $prefetchCount
+     * @param bool $global
+     */
+    public function qos(int $prefetchSize = 0, int $prefetchCount = 0, bool $global = false): void
+    {
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(11)
+            ->appendUint16(60)
+            ->appendUint16(10)
+            ->appendInt32($prefetchSize)
+            ->appendInt16($prefetchCount)
+            ->appendBits([$global])
+            ->appendUint8(206),
+            Protocol\BasicQosOkFrame::class
         );
     }
 
     /**
-     * @return Promise<void>
-     *
-     * @throws \PHPinnacle\Ridge\Exception\ChannelException
-     */
-    public function close(int $code = 0, string $reason = ''): Promise
-    {
-        return call(
-            function () use ($code, $reason) {
-                if ($this->state === self::STATE_CLOSED) {
-                    throw Exception\ChannelException::alreadyClosed($this->id);
-                }
-
-                if ($this->state === self::STATE_CLOSING) {
-                    return;
-                }
-
-                $this->state = self::STATE_CLOSING;
-
-                $this->receiver->stop();
-                $this->consumer->stop();
-
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(11 + \strlen($reason))
-                    ->appendUint16(20)
-                    ->appendUint16(40)
-                    ->appendInt16($code)
-                    ->appendString($reason)
-                    ->appendInt16(0)
-                    ->appendInt16(0)
-                    ->appendUint8(206)
-                );
-
-                yield $this->await(Protocol\ChannelCloseOkFrame::class);
-
-                $this->connection->cancel($this->id);
-
-                $this->state = self::STATE_CLOSED;
-            }
-        );
-    }
-
-    /**
-     * @return Promise<void>
-     */
-    public function qos(int $prefetchSize = 0, int $prefetchCount = 0, bool $global = false): Promise
-    {
-        return call(
-            function () use ($prefetchSize, $prefetchCount, $global) {
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(11)
-                    ->appendUint16(60)
-                    ->appendUint16(10)
-                    ->appendInt32($prefetchSize)
-                    ->appendInt16($prefetchCount)
-                    ->appendBits([$global])
-                    ->appendUint8(206)
-                );
-
-                yield $this->await(Protocol\BasicQosOkFrame::class);
-            }
-        );
-    }
-
-    /**
-     * @return Promise<string>
+     * @param callable $callback
+     * @param string $queue
+     * @param string $consumerTag
+     * @param bool $noLocal
+     * @param bool $noAck
+     * @param bool $exclusive
+     * @param bool $noWait
+     * @param array $arguments
+     * @return string
+     * @throws ChannelException
      */
     public function consume
     (
         callable $callback,
-        string $queue = '',
-        string $consumerTag = '',
-        bool $noLocal = false,
-        bool $noAck = false,
-        bool $exclusive = false,
-        bool $noWait = false,
-        array $arguments = []
-    ): Promise {
+        string   $queue = '',
+        string   $consumerTag = '',
+        bool     $noLocal = false,
+        bool     $noAck = false,
+        bool     $exclusive = false,
+        bool     $noWait = false,
+        array    $arguments = []
+    ): string
+    {
         $flags = [$noLocal, $noAck, $exclusive, $noWait];
 
-        return call(
-            function () use ($callback, $queue, $consumerTag, $flags, $noWait, $arguments) {
-                yield $this->connection->method($this->id, (new Buffer)
-                    ->appendUint16(60)
-                    ->appendUint16(20)
-                    ->appendInt16(0)
-                    ->appendString($queue)
-                    ->appendString($consumerTag)
-                    ->appendBits($flags)
-                    ->appendTable($arguments)
-                );
+        //Subscribe before send request
+        if( $consumerTag ) {
+            $this->consumer->subscribe($consumerTag, $callback);
+        }
 
-                if ($noWait === false) {
+        $payload = (new Buffer)
+            ->appendUint16(60)
+            ->appendUint16(20)
+            ->appendInt16(0)
+            ->appendString($queue)
+            ->appendString($consumerTag)
+            ->appendBits($flags)
+            ->appendTable($arguments);
 
-                    /** @var Protocol\BasicConsumeOkFrame|Protocol\ChannelCloseFrame $frame */
-                    $frame = yield Promise\first([
-                        $this->await(Protocol\BasicConsumeOkFrame::class),
-                        $this->await(Protocol\ChannelCloseFrame::class),
-                    ]);
-
-                    if( $frame instanceof Protocol\ChannelCloseFrame ) {
-                        throw new ChannelException($frame->replyText, $frame->replyCode);
-                    }
-
-                    if ('' === $consumerTag) {
-                        $consumerTag = $frame->consumerTag;
-                    }
-                }
-
-                $this->consumer->subscribe($consumerTag, $callback);
-
-                return $consumerTag;
+        if ($noWait) {
+            if( empty($consumerTag) ) {
+                throw new ProtocolException('Consumer tag can\'t be null with no wait flag');
             }
-        );
+            $this->method($payload);
+        } else {
+            $frame = $this->method($payload, Protocol\BasicConsumeOkFrame::class, Protocol\ChannelCloseFrame::class);
+
+            if ($frame instanceof Protocol\ChannelCloseFrame) {
+                throw new ChannelException($frame->replyText, $frame->replyCode);
+            }
+
+            if ($consumerTag === '') {
+                /** @var Protocol\BasicConsumeOkFrame $frame */
+                $this->consumer->subscribe($frame->consumerTag, $callback);
+            }
+        }
+
+        return $consumerTag;
     }
 
     /**
-     * @return Promise<void>
+     * @param string $consumerTag
+     * @param bool $noWait
      */
-    public function cancel(string $consumerTag, bool $noWait = false): Promise
+    public function cancel(string $consumerTag, bool $noWait = false): void
     {
-        return call(
-            function () use ($consumerTag, $noWait) {
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(6 + \strlen($consumerTag))
-                    ->appendUint16(60)
-                    ->appendUint16(30)
-                    ->appendString($consumerTag)
-                    ->appendBits([$noWait])
-                    ->appendUint8(206)
-                );
+        $buffer = (new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(6 + \strlen($consumerTag))
+            ->appendUint16(60)
+            ->appendUint16(30)
+            ->appendString($consumerTag)
+            ->appendBits([$noWait])
+            ->appendUint8(206);
 
-                if ($noWait === false) {
-                    yield $this->await(Protocol\BasicCancelOkFrame::class);
-                }
+        if ($noWait) {
+            $this->write($buffer);
+        } else {
+            $this->write($buffer, Protocol\BasicCancelOkFrame::class);
+        }
 
-                $this->consumer->cancel($consumerTag);
-            }
-        );
+        $this->consumer->cancel($consumerTag);
     }
 
     /**
-     * @return Promise<void>
-     *
+     * @param Message $message
+     * @param bool $multiple
      * @throws \PHPinnacle\Ridge\Exception\ProtocolException
      */
-    public function ack(Message $message, bool $multiple = false): Promise
+    public function ack(Message $message, bool $multiple = false): void
     {
-        return call(
-            function () use ($message, $multiple) {
-                if ($message->deliveryTag === null) {
-                    throw ProtocolException::unsupportedDeliveryTag();
-                }
+        if ($message->deliveryTag === null) {
+            throw ProtocolException::unsupportedDeliveryTag();
+        }
 
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(13)
-                    ->appendUint16(60)
-                    ->appendUint16(80)
-                    ->appendInt64($message->deliveryTag)
-                    ->appendBits([$multiple])
-                    ->appendUint8(206)
-                );
-            }
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(13)
+            ->appendUint16(60)
+            ->appendUint16(80)
+            ->appendInt64($message->deliveryTag)
+            ->appendBits([$multiple])
+            ->appendUint8(206)
         );
     }
 
     /**
-     * @return Promise<void>
-     *
+     * @param Message $message
+     * @param bool $multiple
+     * @param bool $requeue
      * @throws \PHPinnacle\Ridge\Exception\ProtocolException
      */
-    public function nack(Message $message, bool $multiple = false, bool $requeue = true): Promise
+    public function nack(Message $message, bool $multiple = false, bool $requeue = true): void
     {
-        return call(
-            function () use ($message, $multiple, $requeue) {
-                if ($message->deliveryTag === null) {
-                    throw ProtocolException::unsupportedDeliveryTag();
-                }
+        if ($message->deliveryTag === null) {
+            throw ProtocolException::unsupportedDeliveryTag();
+        }
 
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(13)
-                    ->appendUint16(60)
-                    ->appendUint16(120)
-                    ->appendInt64($message->deliveryTag)
-                    ->appendBits([$multiple, $requeue])
-                    ->appendUint8(206)
-                );
-            }
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(13)
+            ->appendUint16(60)
+            ->appendUint16(120)
+            ->appendInt64($message->deliveryTag)
+            ->appendBits([$multiple, $requeue])
+            ->appendUint8(206)
         );
     }
 
     /**
-     * @return Promise<void>
-     *
+     * @param Message $message
+     * @param bool $requeue
      * @throws \PHPinnacle\Ridge\Exception\ProtocolException
      */
-    public function reject(Message $message, bool $requeue = true): Promise
+    public function reject(Message $message, bool $requeue = true): void
     {
-        return call(function () use ($message, $requeue) {
-            if ($message->deliveryTag === null) {
-                throw ProtocolException::unsupportedDeliveryTag();
-            }
+        if ($message->deliveryTag === null) {
+            throw ProtocolException::unsupportedDeliveryTag();
+        }
 
-            yield $this->connection->write((new Buffer)
-                ->appendUint8(1)
-                ->appendUint16($this->id)
-                ->appendUint32(13)
-                ->appendUint16(60)
-                ->appendUint16(90)
-                ->appendInt64($message->deliveryTag)
-                ->appendBits([$requeue])
-                ->appendUint8(206)
-            );
-        });
-    }
-
-    /**
-     * @return Promise<void>
-     */
-    public function recover(bool $requeue = false): Promise
-    {
-        return call(
-            function () use ($requeue) {
-                $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(5)
-                    ->appendUint16(60)
-                    ->appendUint16(110)
-                    ->appendBits([$requeue])
-                    ->appendUint8(206)
-                );
-
-                yield $this->await(Protocol\BasicRecoverOkFrame::class);
-            }
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(13)
+            ->appendUint16(60)
+            ->appendUint16(90)
+            ->appendInt64($message->deliveryTag)
+            ->appendBits([$requeue])
+            ->appendUint8(206)
         );
     }
 
     /**
-     * @return Promise<Message|null>
+     * @param bool $requeue
      */
-    public function get(string $queue = '', bool $noAck = false): Promise
+    public function recover(bool $requeue = false): void
+    {
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(5)
+            ->appendUint16(60)
+            ->appendUint16(110)
+            ->appendBits([$requeue])
+            ->appendUint8(206),
+            Protocol\BasicRecoverOkFrame::class
+        );
+    }
+
+    /**
+     * @param string $queue
+     * @param bool $noAck
+     * @return Message|null
+     */
+    public function get(string $queue = '', bool $noAck = false): ?Message
     {
         static $getting = false;
 
-        return call(
-            function () use ($queue, $noAck, &$getting) {
-                if ($getting) {
-                    throw Exception\ChannelException::getInProgress();
-                }
+        if ($getting) {
+            throw Exception\ChannelException::getInProgress();
+        }
 
-                $getting = true;
+        $getting = true;
 
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(8 + \strlen($queue))
-                    ->appendUint16(60)
-                    ->appendUint16(70)
-                    ->appendInt16(0)
-                    ->appendString($queue)
-                    ->appendBits([$noAck])
-                    ->appendUint8(206)
-                );
+        /** @var Protocol\BasicGetOkFrame|Protocol\BasicGetEmptyFrame $frame */
+        $frame = $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(8 + \strlen($queue))
+            ->appendUint16(60)
+            ->appendUint16(70)
+            ->appendInt16(0)
+            ->appendString($queue)
+            ->appendBits([$noAck])
+            ->appendUint8(206),
+            Protocol\BasicGetOkFrame::class,
+            Protocol\BasicGetEmptyFrame::class
+        );
 
-                /** @var Protocol\BasicGetOkFrame|Protocol\BasicGetEmptyFrame $frame */
-                $frame = yield Promise\first([
-                    $this->await(Protocol\BasicGetOkFrame::class),
-                    $this->await(Protocol\BasicGetEmptyFrame::class)
-                ]);
+        if ($frame instanceof Protocol\BasicGetEmptyFrame) {
+            $getting = false;
+            return null;
+        }
 
-                if ($frame instanceof Protocol\BasicGetEmptyFrame) {
-                    $getting = false;
+        /** @var Protocol\ContentHeaderFrame $header */
+        $header = $this->await(Protocol\ContentHeaderFrame::class)->await(new CompositeCancellation($this->cancellation(), new TimeoutCancellation(self::AWAIT_TIMEOUT)));
 
-                    return null;
-                }
+        $buffer = new Buffer;
+        $remaining = $header->bodySize;
 
-                /** @var Protocol\ContentHeaderFrame $header */
-                $header = yield $this->await(Protocol\ContentHeaderFrame::class);
+        while ($remaining > 0) {
+            /** @var Protocol\ContentBodyFrame $body */
+            $body = $this->await(Protocol\ContentBodyFrame::class)->await(new CompositeCancellation($this->cancellation(), new TimeoutCancellation(self::AWAIT_TIMEOUT)));
 
-                $buffer = new Buffer;
-                $remaining = $header->bodySize;
+            $buffer->append((string)$body->payload);
 
-                while ($remaining > 0) {
-                    /** @var Protocol\ContentBodyFrame $body */
-                    $body = yield $this->await(Protocol\ContentBodyFrame::class);
+            $remaining -= (int)$body->size;
 
-                    $buffer->append((string)$body->payload);
-
-                    $remaining -= (int)$body->size;
-
-                    if ($remaining < 0) {
-                        $this->state = self::STATE_ERROR;
-
-                        throw Exception\ChannelException::bodyOverflow($remaining);
-                    }
-                }
-
-                $getting = false;
-
-                return new Message(
-                    $buffer->flush(),
-                    $frame->exchange,
-                    $frame->routingKey,
-                    null,
-                    $frame->deliveryTag,
-                    $frame->redelivered,
-                    false,
-                    $header->toArray()
-                );
+            if ($remaining < 0) {
+                $this->state = self::STATE_ERROR;
+                $this->close();
+                throw Exception\ChannelException::bodyOverflow($remaining, $buffer->flush());
             }
+        }
+
+        $getting = false;
+        return new Message(
+            $buffer->flush(),
+            $frame->exchange,
+            $frame->routingKey,
+            null,
+            $frame->deliveryTag,
+            $frame->redelivered,
+            false,
+            $header->toArray()
         );
     }
 
     /**
-     * @return Promise<int|null>
+     * @param string $body
+     * @param string $exchange
+     * @param string $routingKey
+     * @param array $headers
+     * @param bool $mandatory
+     * @param bool $immediate
+     * @return int|null
      */
     public function publish
     (
         string $body,
         string $exchange = '',
         string $routingKey = '',
-        array $headers = [],
-        bool $mandatory = false,
-        bool $immediate = false
-    ): Promise {
-        return call(
-            function () use ($body, $exchange, $routingKey, $headers, $mandatory, $immediate) {
-                yield $this->doPublish($body, $exchange, $routingKey, $headers, $mandatory, $immediate);
-
-                return $this->mode === self::MODE_CONFIRM ? ++$this->deliveryTag : null;
-            }
-        );
-    }
-
-    /**
-     * @return Promise<void>
-     *
-     * @throws \PHPinnacle\Ridge\Exception\ChannelException
-     */
-    public function txSelect(): Promise
+        array  $headers = [],
+        bool   $mandatory = false,
+        bool   $immediate = false
+    ): ?int
     {
-        return call(
-            function () {
-                if ($this->mode !== self::MODE_REGULAR) {
-                    throw Exception\ChannelException::notRegularFor("transactional");
-                }
+        $this->doPublish($body, $exchange, $routingKey, $headers, $mandatory, $immediate);
 
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(4)
-                    ->appendUint16(90)
-                    ->appendUint16(10)
-                    ->appendUint8(206)
-                );
-
-                yield $this->await(Protocol\TxSelectOkFrame::class);
-
-                $this->mode = self::MODE_TRANSACTIONAL;
-            }
-        );
+        return $this->mode === self::MODE_CONFIRM ? ++$this->deliveryTag : null;
     }
 
     /**
-     * @return Promise<void>
-     *
-     * @throws \PHPinnacle\Ridge\Exception\ChannelException
+     * @throws Exception\ChannelException
      */
-    public function txCommit(): Promise
+    public function txSelect(): void
     {
-        return call(
-            function () {
-                if ($this->mode !== self::MODE_TRANSACTIONAL) {
-                    throw Exception\ChannelException::notTransactional();
-                }
+        if ($this->mode !== self::MODE_REGULAR) {
+            throw Exception\ChannelException::notRegularFor("transactional");
+        }
 
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(4)
-                    ->appendUint16(90)
-                    ->appendUint16(20)
-                    ->appendUint8(206)
-                );
-
-                yield $this->await(Protocol\TxCommitOkFrame::class);
-            }
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(4)
+            ->appendUint16(90)
+            ->appendUint16(10)
+            ->appendUint8(206),
+            Protocol\TxSelectOkFrame::class
         );
+
+        $this->mode = self::MODE_TRANSACTIONAL;
     }
 
     /**
-     * @return Promise<void>
-     *
-     * @throws \PHPinnacle\Ridge\Exception\ChannelException
+     * @throws Exception\ChannelException
      */
-    public function txRollback(): Promise
+    public function txCommit(): void
     {
-        return call(
-            function () {
-                if ($this->mode !== self::MODE_TRANSACTIONAL) {
-                    throw Exception\ChannelException::notTransactional();
-                }
+        if ($this->mode !== self::MODE_TRANSACTIONAL) {
+            throw Exception\ChannelException::notTransactional();
+        }
 
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(4)
-                    ->appendUint16(90)
-                    ->appendUint16(30)
-                    ->appendUint8(206)
-                );
-
-                yield $this->await(Protocol\TxRollbackOkFrame::class);
-            }
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(4)
+            ->appendUint16(90)
+            ->appendUint16(20)
+            ->appendUint8(206),
+            Protocol\TxCommitOkFrame::class
         );
     }
 
     /**
-     * @return Promise<void>
-     *
-     * @throws \PHPinnacle\Ridge\Exception\ChannelException
+     * @throws Exception\ChannelException
      */
-    public function confirmSelect(bool $noWait = false): Promise
+    public function txRollback(): void
     {
-        return call(
-            function () use ($noWait) {
-                if ($this->mode !== self::MODE_REGULAR) {
-                    throw Exception\ChannelException::notRegularFor("confirm");
-                }
+        if ($this->mode !== self::MODE_TRANSACTIONAL) {
+            throw Exception\ChannelException::notTransactional();
+        }
 
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(5)
-                    ->appendUint16(85)
-                    ->appendUint16(10)
-                    ->appendBits([$noWait])
-                    ->appendUint8(206)
-                );
-
-                if ($noWait === false) {
-                    yield $this->await(Protocol\ConfirmSelectOkFrame::class);
-                }
-
-                $this->mode = self::MODE_CONFIRM;
-                $this->deliveryTag = 0;
-            }
+        $this->write((new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(4)
+            ->appendUint16(90)
+            ->appendUint16(30)
+            ->appendUint8(206),
+            Protocol\TxRollbackOkFrame::class
         );
     }
 
     /**
-     * @return Promise<Queue|null>
+     * @throws Exception\ChannelException
+     */
+    public function confirmSelect(bool $noWait = false): void
+    {
+        if ($this->mode !== self::MODE_REGULAR) {
+            throw Exception\ChannelException::notRegularFor("confirm");
+        }
+
+        $buffer = (new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(5)
+            ->appendUint16(85)
+            ->appendUint16(10)
+            ->appendBits([$noWait])
+            ->appendUint8(206);
+
+        if ($noWait) {
+            $this->write($buffer);
+        } else {
+            $this->write($buffer, Protocol\ConfirmSelectOkFrame::class);
+        }
+
+        $this->mode = self::MODE_CONFIRM;
+        $this->deliveryTag = 0;
+    }
+
+    /**
+     * @param string $queue
+     * @param bool $passive
+     * @param bool $durable
+     * @param bool $exclusive
+     * @param bool $autoDelete
+     * @param bool $noWait
+     * @param array $arguments
+     * @return Queue|null
      */
     public function queueDeclare
     (
         string $queue = '',
-        bool $passive = false,
-        bool $durable = false,
-        bool $exclusive = false,
-        bool $autoDelete = false,
-        bool $noWait = false,
-        array $arguments = []
-    ): Promise {
+        bool   $passive = false,
+        bool   $durable = false,
+        bool   $exclusive = false,
+        bool   $autoDelete = false,
+        bool   $noWait = false,
+        array  $arguments = []
+    ): ?Queue
+    {
         $flags = [$passive, $durable, $exclusive, $autoDelete, $noWait];
 
-        return call(
-            function () use ($queue, $flags, $noWait, $arguments) {
-                yield $this->connection->method($this->id, (new Buffer)
-                    ->appendUint16(50)
-                    ->appendUint16(10)
-                    ->appendInt16(0)
-                    ->appendString($queue)
-                    ->appendBits($flags)
-                    ->appendTable($arguments)
-                );
+        $buffer = (new Buffer)
+            ->appendUint16(50)
+            ->appendUint16(10)
+            ->appendInt16(0)
+            ->appendString($queue)
+            ->appendBits($flags)
+            ->appendTable($arguments);
 
-                if ($noWait) {
-                    return null;
-                }
+        if ($noWait) {
+            $this->method($buffer);
+            return null;
+        }
 
-                /** @var Protocol\ChannelCloseFrame|Protocol\QueueDeclareOkFrame $frame */
-                $frame = yield Promise\first([
-                    $this->await(Protocol\ChannelCloseFrame::class),
-                    $this->await(Protocol\QueueDeclareOkFrame::class)
-                ]);
+        $frame = $this->method($buffer, Protocol\QueueDeclareOkFrame::class, Protocol\ChannelCloseFrame::class);
 
-                if( $frame instanceof Protocol\QueueDeclareOkFrame ) {
-                    return new Queue($frame->queue, $frame->messageCount, $frame->consumerCount);
-                }
-                throw new ChannelException($frame->replyText, $frame->replyCode);
-            }
-        );
+        if ($frame instanceof Protocol\ChannelCloseFrame) {
+            throw new ChannelException($frame->replyText, $frame->replyCode);
+        }
+
+        /** @var Protocol\QueueDeclareOkFrame $frame */
+        return new Queue($frame->queue, $frame->messageCount, $frame->consumerCount);
     }
 
     /**
-     * @return Promise<void>
+     * @param string $queue
+     * @param string $exchange
+     * @param string $routingKey
+     * @param bool $noWait
+     * @param array $arguments
      */
     public function queueBind
     (
         string $queue = '',
         string $exchange = '',
         string $routingKey = '',
-        bool $noWait = false,
-        array $arguments = []
-    ): Promise {
-        return call(
-            function () use ($queue, $exchange, $routingKey, $noWait, $arguments) {
-                yield $this->connection->method($this->id, (new Buffer)
-                    ->appendUint16(50)
-                    ->appendUint16(20)
-                    ->appendInt16(0)
-                    ->appendString($queue)
-                    ->appendString($exchange)
-                    ->appendString($routingKey)
-                    ->appendBits([$noWait])
-                    ->appendTable($arguments)
-                );
+        bool   $noWait = false,
+        array  $arguments = []
+    ): void
+    {
+        $buffer = (new Buffer)
+            ->appendUint16(50)
+            ->appendUint16(20)
+            ->appendInt16(0)
+            ->appendString($queue)
+            ->appendString($exchange)
+            ->appendString($routingKey)
+            ->appendBits([$noWait])
+            ->appendTable($arguments);
 
-                if ($noWait) {
-                    return;
-                }
-
-                yield $this->await(Protocol\QueueBindOkFrame::class);
-            }
-        );
+        if( $noWait ) {
+            $this->method($buffer);
+        } else {
+            $this->method($buffer, Protocol\QueueBindOkFrame::class);
+        }
     }
 
     /**
-     * @return Promise<void>
+     * @param string $queue
+     * @param string $exchange
+     * @param string $routingKey
+     * @param bool $noWait
+     * @param array $arguments
      */
     public function queueUnbind
     (
         string $queue = '',
         string $exchange = '',
         string $routingKey = '',
-        bool $noWait = false,
-        array $arguments = []
-    ): Promise {
-        return call(
-            function () use ($queue, $exchange, $routingKey, $noWait, $arguments) {
-                yield $this->connection->method($this->id, (new Buffer)
-                    ->appendUint16(50)
-                    ->appendUint16(50)
-                    ->appendInt16(0)
-                    ->appendString($queue)
-                    ->appendString($exchange)
-                    ->appendString($routingKey)
-                    ->appendTable($arguments)
-                );
-
-                if ($noWait) {
-                    return;
-                }
-
-                yield $this->await(Protocol\QueueUnbindOkFrame::class);
-            }
-        );
-    }
-
-    /**
-     * @return Promise<int>
-     */
-    public function queuePurge(string $queue = '', bool $noWait = false): Promise
+        bool   $noWait = false,
+        array  $arguments = []
+    ): void
     {
-        return call(
-            function () use ($queue, $noWait) {
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(8 + \strlen($queue))
-                    ->appendUint16(50)
-                    ->appendUint16(30)
-                    ->appendInt16(0)
-                    ->appendString($queue)
-                    ->appendBits([$noWait])
-                    ->appendUint8(206)
-                );
+        $buffer = (new Buffer)
+            ->appendUint16(50)
+            ->appendUint16(50)
+            ->appendInt16(0)
+            ->appendString($queue)
+            ->appendString($exchange)
+            ->appendString($routingKey)
+            ->appendTable($arguments);
 
-                if ($noWait) {
-                    return 0;
-                }
-
-                /** @var Protocol\QueuePurgeOkFrame $frame */
-                $frame = yield $this->await(Protocol\QueuePurgeOkFrame::class);
-
-                return $frame->messageCount;
-            }
-        );
+        if( $noWait ) {
+            $this->method($buffer);
+        } else {
+            $this->method($buffer, Protocol\QueueUnbindOkFrame::class);
+        }
     }
 
     /**
-     * @return Promise<int>
+     * @param string $queue
+     * @param bool $noWait
+     * @return int
+     */
+    public function queuePurge(string $queue = '', bool $noWait = false): int
+    {
+        $buffer = (new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(8 + \strlen($queue))
+            ->appendUint16(50)
+            ->appendUint16(30)
+            ->appendInt16(0)
+            ->appendString($queue)
+            ->appendBits([$noWait])
+            ->appendUint8(206);
+
+        if ($noWait) {
+            $this->write($buffer);
+            return 0;
+        }
+
+        /** @var Protocol\QueuePurgeOkFrame $frame */
+        $frame = $this->write($buffer, Protocol\QueuePurgeOkFrame::class);
+
+        return $frame->messageCount;
+    }
+
+    /**
+     * @param string $queue
+     * @param bool $ifUnused
+     * @param bool $ifEmpty
+     * @param bool $noWait
+     * @return int
      */
     public function queueDelete
     (
         string $queue = '',
-        bool $ifUnused = false,
-        bool $ifEmpty = false,
-        bool $noWait = false
-    ): Promise {
+        bool   $ifUnused = false,
+        bool   $ifEmpty = false,
+        bool   $noWait = false
+    ): int
+    {
         $flags = [$ifUnused, $ifEmpty, $noWait];
 
-        return call(
-            function () use ($queue, $flags, $noWait) {
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(8 + strlen($queue))
-                    ->appendUint16(50)
-                    ->appendUint16(40)
-                    ->appendInt16(0)
-                    ->appendString($queue)
-                    ->appendBits($flags)
-                    ->appendUint8(206)
-                );
+        $buffer = (new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(8 + strlen($queue))
+            ->appendUint16(50)
+            ->appendUint16(40)
+            ->appendInt16(0)
+            ->appendString($queue)
+            ->appendBits($flags)
+            ->appendUint8(206);
 
-                if ($noWait) {
-                    return 0;
-                }
+        if ($noWait) {
+            $this->write($buffer);
+            return 0;
+        }
 
-                /** @var Protocol\ChannelCloseFrame|Protocol\QueueDeleteOkFrame $frame */
-                $frame = yield Promise\first([
-                    $this->await(Protocol\ChannelCloseFrame::class),
-                    $this->await(Protocol\QueueDeleteOkFrame::class)
-                ]);
+        $frame = $this->write($buffer, Protocol\QueueDeleteOkFrame::class, Protocol\ChannelCloseFrame::class);
 
-                if( $frame instanceof Protocol\QueueDeleteOkFrame ) {
-                    return $frame->messageCount;
-                }
-                throw new ChannelException($frame->replyText, $frame->replyCode);
-            }
-        );
+        if ($frame instanceof Protocol\ChannelCloseFrame) {
+            throw new ChannelException($frame->replyText, $frame->replyCode);
+        }
+
+        /** @var Protocol\QueueDeleteOkFrame $frame */
+        return $frame->messageCount;
     }
 
     /**
-     * @return Promise<void>
+     * @param string $exchange
+     * @param string $exchangeType
+     * @param bool $passive
+     * @param bool $durable
+     * @param bool $autoDelete
+     * @param bool $internal
+     * @param bool $noWait
+     * @param array $arguments
      */
     public function exchangeDeclare
     (
         string $exchange,
         string $exchangeType = 'direct',
-        bool $passive = false,
-        bool $durable = false,
-        bool $autoDelete = false,
-        bool $internal = false,
-        bool $noWait = false,
-        array $arguments = []
-    ): Promise {
+        bool   $passive = false,
+        bool   $durable = false,
+        bool   $autoDelete = false,
+        bool   $internal = false,
+        bool   $noWait = false,
+        array  $arguments = []
+    ): void
+    {
         $flags = [$passive, $durable, $autoDelete, $internal, $noWait];
 
-        return call(
-            function () use ($exchange, $exchangeType, $flags, $noWait, $arguments) {
-                yield $this->connection->method($this->id, (new Buffer)
-                    ->appendUint16(40)
-                    ->appendUint16(10)
-                    ->appendInt16(0)
-                    ->appendString($exchange)
-                    ->appendString($exchangeType)
-                    ->appendBits($flags)
-                    ->appendTable($arguments)
-                );
+        $buffer = (new Buffer)
+            ->appendUint16(40)
+            ->appendUint16(10)
+            ->appendInt16(0)
+            ->appendString($exchange)
+            ->appendString($exchangeType)
+            ->appendBits($flags)
+            ->appendTable($arguments);
 
-                if ($noWait) {
-                    return;
-                }
+        if ($noWait) {
+            $this->method($buffer);
+            return;
+        }
 
-                yield $this->await(Protocol\ExchangeDeclareOkFrame::class);
-            }
-        );
+        $frame = $this->method($buffer, Protocol\ExchangeDeclareOkFrame::class, Protocol\ChannelCloseFrame::class);
+        if ($frame instanceof Protocol\ChannelCloseFrame) {
+            throw new ChannelException($frame->replyText, $frame->replyCode);
+        }
     }
 
     /**
-     * @return Promise<void>
+     * @param string $destination
+     * @param string $source
+     * @param string $routingKey
+     * @param bool $noWait
+     * @param array $arguments
      */
     public function exchangeBind
     (
         string $destination,
         string $source,
         string $routingKey = '',
-        bool $noWait = false,
-        array $arguments = []
-    ): Promise {
-        return call(
-            function () use ($destination, $source, $routingKey, $noWait, $arguments) {
-                yield $this->connection->method($this->id, (new Buffer)
-                    ->appendUint16(40)
-                    ->appendUint16(30)
-                    ->appendInt16(0)
-                    ->appendString($destination)
-                    ->appendString($source)
-                    ->appendString($routingKey)
-                    ->appendBits([$noWait])
-                    ->appendTable($arguments)
-                );
+        bool   $noWait = false,
+        array  $arguments = []
+    ): void
+    {
+        $buffer = (new Buffer)
+            ->appendUint16(40)
+            ->appendUint16(30)
+            ->appendInt16(0)
+            ->appendString($destination)
+            ->appendString($source)
+            ->appendString($routingKey)
+            ->appendBits([$noWait])
+            ->appendTable($arguments);
 
-                if ($noWait) {
-                    return;
-                }
-
-                yield $this->await(Protocol\ExchangeBindOkFrame::class);
-            }
-        );
+        if( $noWait) {
+            $this->method($buffer);
+        } else {
+            $this->method($buffer, Protocol\ExchangeBindOkFrame::class);
+        }
     }
 
     /**
-     * @return Promise<void>
+     * @param string $destination
+     * @param string $source
+     * @param string $routingKey
+     * @param bool $noWait
+     * @param array $arguments
      */
     public function exchangeUnbind
     (
         string $destination,
         string $source,
         string $routingKey = '',
-        bool $noWait = false,
-        array $arguments = []
-    ): Promise {
-        return call(
-            function () use ($destination, $source, $routingKey, $noWait, $arguments) {
-                yield $this->connection->method($this->id, (new Buffer)
-                    ->appendUint16(40)
-                    ->appendUint16(40)
-                    ->appendInt16(0)
-                    ->appendString($destination)
-                    ->appendString($source)
-                    ->appendString($routingKey)
-                    ->appendBits([$noWait])
-                    ->appendTable($arguments)
-                );
+        bool   $noWait = false,
+        array  $arguments = []
+    ): void
+    {
+        $buffer = (new Buffer)
+            ->appendUint16(40)
+            ->appendUint16(40)
+            ->appendInt16(0)
+            ->appendString($destination)
+            ->appendString($source)
+            ->appendString($routingKey)
+            ->appendBits([$noWait])
+            ->appendTable($arguments);
 
-                if ($noWait) {
-                    return;
-                }
-
-                yield $this->await(Protocol\ExchangeUnbindOkFrame::class);
-            }
-        );
+        if( $noWait ) {
+            $this->method($buffer);
+        } else {
+            $this->method($buffer, Protocol\ExchangeUnbindOkFrame::class);
+        }
     }
 
     /**
-     * @return Promise<void>
+     * @param string $exchange
+     * @param bool $unused
+     * @param bool $noWait
      */
-    public function exchangeDelete(string $exchange, bool $unused = false, bool $noWait = false): Promise
+    public function exchangeDelete(string $exchange, bool $unused = false, bool $noWait = false): void
     {
-        return call(
-            function () use ($exchange, $unused, $noWait) {
-                yield $this->connection->write((new Buffer)
-                    ->appendUint8(1)
-                    ->appendUint16($this->id)
-                    ->appendUint32(8 + \strlen($exchange))
-                    ->appendUint16(40)
-                    ->appendUint16(20)
-                    ->appendInt16(0)
-                    ->appendString($exchange)
-                    ->appendBits([$unused, $noWait])
-                    ->appendUint8(206)
-                );
+        $buffer = (new Buffer)
+            ->appendUint8(1)
+            ->appendUint16($this->id)
+            ->appendUint32(8 + \strlen($exchange))
+            ->appendUint16(40)
+            ->appendUint16(20)
+            ->appendInt16(0)
+            ->appendString($exchange)
+            ->appendBits([$unused, $noWait])
+            ->appendUint8(206);
 
-                if ($noWait) {
-                    return;
-                }
-
-                yield $this->await(Protocol\ExchangeDeleteOkFrame::class);
-            }
-        );
+        if ($noWait) {
+            $this->write($buffer);
+        } else {
+            $this->write($buffer, Protocol\ExchangeDeleteOkFrame::class);
+        }
     }
 
+    /**
+     * @param string $body
+     * @param string $exchange
+     * @param string $routingKey
+     * @param array $headers
+     * @param bool $mandatory
+     * @param bool $immediate
+     */
     public function doPublish
     (
         string $body,
         string $exchange = '',
         string $routingKey = '',
-        array $headers = [],
-        bool $mandatory = false,
-        bool $immediate = false
-    ): Promise {
+        array  $headers = [],
+        bool   $mandatory = false,
+        bool   $immediate = false
+    ): void
+    {
         $flags = 0;
         $contentType = '';
         $contentEncoding = '';
@@ -934,8 +939,7 @@ final class Channel
 
         $headersBuffer = null;
 
-        $buffer = new Buffer;
-        $buffer
+        $buffer = (new Buffer)
             ->appendUint8(1)
             ->appendUint16($this->id)
             ->appendUint32(9 + \strlen($exchange) + \strlen($routingKey))
@@ -1132,7 +1136,7 @@ final class Channel
             /* @phpstan-ignore-next-line */
             $chunks = \str_split($body, $this->properties->maxFrame());
 
-            if ($chunks !== false) {
+            if ($chunks) {
                 foreach ($chunks as $chunk) {
                     $buffer
                         ->appendUint8(3)
@@ -1144,30 +1148,109 @@ final class Channel
             }
         }
 
-        return $this->connection->write($buffer);
+        $this->write($buffer);
+    }
+
+    /**
+     * @throws ChannelException
+     */
+    private function throwIfClosed(): void
+    {
+        if (in_array($this->state, [self::STATE_CLOSED, self::STATE_ERROR])) {
+            throw new ChannelException('Channel #' . $this->id . ' was closed');
+        }
+    }
+
+    /**
+     * Write buffer and wait result
+     * @param Buffer $payload
+     * @param string ...$frames
+     * @return AbstractFrame|null
+     * @template T of Protocol\AbstractFrame
+     * @psalm-param array<int, class-string<T>> $frames
+     * @psalm-return T|null
+     * @throws ChannelException|ProtocolException
+     */
+    private function method(Buffer $payload, string ...$frames): ?AbstractFrame
+    {
+        $this->throwIfClosed();
+        try {
+            if ($frames) {
+                $future = $this->await(...$frames);
+            }
+            $this->connection->method($this->id, $payload);
+            if ($frames) {
+                return $future->await(new CompositeCancellation($this->cancellation(), new TimeoutCancellation(self::AWAIT_TIMEOUT)));
+            }
+        } catch (CancelledException $e) {
+            $this->connection->onClosed = null;
+            if( $e->getPrevious() instanceof ChannelException ) {
+                throw $e->getPrevious();
+            }
+            throw new ProtocolException($e->getMessage() . ($e->getPrevious() ? '. ' . $e->getPrevious()->getMessage() : '') . '. Wait frames: ' . implode(', ', $frames ?: []));
+        }
+        return null;
+    }
+
+    /**
+     * Write buffer and wait result
+     * @param Buffer $buffer
+     * @param string ...$frames
+     * @return AbstractFrame|null
+     * @template T of Protocol\AbstractFrame
+     * @psalm-param array<int, class-string<T>> $frames
+     * @psalm-return T|null
+     */
+    private function write(Buffer $buffer, string ...$frames): ?AbstractFrame
+    {
+        $this->throwIfClosed();
+        try {
+            if ($frames) {
+                $future = $this->await(...$frames);
+            }
+            $this->connection->write($buffer);
+            if ($frames) {
+                return $future->await(new TimeoutCancellation(self::AWAIT_TIMEOUT));
+            }
+        } catch (CancelledException $e) {
+            $this->connection->onClosed = null;
+            throw new ProtocolException($e->getMessage() . ($e->getPrevious() ? '. ' . $e->getPrevious()->getMessage() : '') . '. Wait frames: ' . implode(', ', $frames ?: []));
+        }
+        return null;
     }
 
     /**
      * @template T of Protocol\AbstractFrame
-     * @psalm-param class-string<T> $frame
-     * @psalm-return Promise<T>
+     * @psalm-param array<int, class-string<T>> $frames
+     * @psalm-return Future<T>
      */
-    private function await(string $frame): Promise
+    private function await(string ...$frames): Future
     {
-        /** @psalm-var Deferred<T> $deferred */
-        $deferred = new Deferred;
+        $deferred = new DeferredFuture();
+        $ids = [];
+        $unsubscribe = function () use (&$ids) {
+            foreach ($ids as $frame => $id) {
+                $this->connection->unsubscribe($this->id, $frame, $id);
+            }
+        };
 
-        $this->connection->subscribe(
-            $this->id,
-            $frame,
-            static function (Protocol\AbstractFrame $frame) use ($deferred) {
-                /** @psalm-var T $frame */
-                $deferred->resolve($frame);
+        //Set callback on connection closed
+        $this->connection->onClosed = static fn(string $message) => $deferred->error(ClientException::disconnected($message));
+
+        foreach ($frames as $frame) {
+            /** @psalm-var class-string<T> $frame */
+            $ids[$frame] = $this->connection->subscribe($this->id, $frame, function (Protocol\AbstractFrame $frame) use ($deferred, $unsubscribe) {
+                $unsubscribe();
+                $this->connection->onClosed = null;
+                if (!$deferred->isComplete()) {
+                    /** @psalm-var T $frame */
+                    $deferred->complete($frame);
+                }
 
                 return true;
-            }
-        );
+            });
+        }
 
-        return $deferred->promise();
+        return $deferred->getFuture();
     }
 }

@@ -3,7 +3,6 @@
         totallyTyped="true"
         useDocblockTypes="true"
         useDocblockPropertyTypes="true"
-        strictBinaryOperands="true"
         findUnusedPsalmSuppress="true"
         ignoreInternalFunctionFalseReturn="false"
         ignoreInternalFunctionNullReturn="false"

@@ -10,23 +10,12 @@
 
 namespace PHPinnacle\Ridge\Tests;
 
-use Amp\Promise;
+use Amp\PHPUnit\AsyncTestCase;
 use PHPinnacle\Ridge\Client;
 use PHPinnacle\Ridge\Config;
-use PHPUnit\Framework\TestCase;
 
-abstract class RidgeTest extends TestCase
+abstract class RidgeTest extends AsyncTestCase
 {
-    /**
-     * @param mixed $value
-     *
-     * @return void
-     */
-    protected static function assertPromise($value): void
-    {
-        self::assertInstanceOf(Promise::class, $value);
-    }
-
     /**
      * @return Client
      */

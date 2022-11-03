@@ -12,8 +12,6 @@ declare(strict_types=1);
 
 namespace PHPinnacle\Ridge;
 
-use function Amp\asyncCall;
-
 final class MessageReceiver
 {
     public const
@@ -22,54 +20,37 @@ final class MessageReceiver
         STATE_BODY = 2;
 
     /**
-     * @var Channel
-     */
-    private $channel;
-
-    /**
-     * @var Connection
-     */
-    private $connection;
-
-    /**
      * @var Buffer
      */
-    private $buffer;
+    private Buffer $buffer;
 
     /**
      * @var int
      */
-    private $state = self::STATE_WAIT;
-
-    /**
-     * @var int
-     */
-    private $remaining = 0;
+    private int $state = self::STATE_WAIT;
 
     /**
      * @var callable[]
      */
-    private $callbacks = [];
+    private array $callbacks = [];
 
     /**
      * @var Protocol\BasicDeliverFrame|null
      */
-    private $deliver;
+    private ?Protocol\BasicDeliverFrame $deliver;
 
     /**
      * @var Protocol\BasicReturnFrame|null
      */
-    private $return;
+    private ?Protocol\BasicReturnFrame $return;
 
     /**
      * @var Protocol\ContentHeaderFrame|null
      */
-    private $header;
+    private ?Protocol\ContentHeaderFrame $header;
 
-    public function __construct(Channel $channel, Connection $connection)
+    public function __construct(private readonly Channel $channel, private readonly Connection $connection)
     {
-        $this->channel = $channel;
-        $this->connection = $connection;
         $this->buffer = new Buffer;
     }
 
@@ -127,7 +108,6 @@ final class MessageReceiver
 
         $this->state = self::STATE_BODY;
         $this->header = $frame;
-        $this->remaining = $frame->bodySize;
 
         $this->runCallbacks();
     }
@@ -140,25 +120,25 @@ final class MessageReceiver
 
         $this->buffer->append((string)$frame->payload);
 
-        $this->remaining -= (int)$frame->size;
-
-        if ($this->remaining < 0) {
-            throw Exception\ChannelException::bodyOverflow($this->remaining);
+        if ($this->header && $this->buffer->size() > $this->header->bodySize ) {
+            $exception = Exception\ChannelException::bodyOverflow($this->buffer->size() - $this->header->bodySize, $this->buffer->flush());
+            $this->channel->close();
+            throw $exception;
         }
 
         $this->runCallbacks();
     }
 
     /**
-     * @throws \PHPinnacle\Ridge\Exception\ChannelException
+     * @throws Exception\ChannelException
      */
     private function runCallbacks(): void
     {
-        if ($this->remaining !== 0) {
+        if (!$this->header || $this->buffer->size() !== $this->header->bodySize) {
             return;
         }
 
-        if ($this->return) {
+        if (isset($this->return)) {
             $message = new Message(
                 $this->buffer->flush(),
                 $this->return->exchange,
@@ -167,7 +147,7 @@ final class MessageReceiver
                 null,
                 false,
                 true,
-                $this->header !== null ? $this->header->toArray() : []
+                $this->header->toArray()
             );
         } else {
             if ($this->deliver) {
@@ -179,7 +159,7 @@ final class MessageReceiver
                     $this->deliver->deliveryTag,
                     $this->deliver->redelivered,
                     false,
-                    $this->header !== null ? $this->header->toArray() : []
+                    $this->header->toArray()
                 );
             } else {
                 throw Exception\ChannelException::frameOrder();
@@ -191,8 +171,11 @@ final class MessageReceiver
         $this->header = null;
 
         foreach ($this->callbacks as $callback) {
-            /** @psalm-suppress MixedArgumentTypeCoercion */
-            asyncCall($callback, $message);
+            try {
+                $callback($message);
+            } catch (Exception\ConsumerException $e) {
+                $this->channel->nack($message);
+            }
         }
 
         $this->state = self::STATE_WAIT;

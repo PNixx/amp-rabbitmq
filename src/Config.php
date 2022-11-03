@@ -25,76 +25,76 @@ final class Config
     /**
      * @var string
      */
-    public $host;
+    public string $host;
 
     /**
      * @var int
      */
-    public $port;
+    public int $port;
 
     /**
      * @var string
      */
-    public $user;
+    public string $user;
 
     /**
      * @var string
      */
-    public $pass;
+    public string $pass;
 
     /**
      * @var string
      */
-    public $vhost;
+    public string $vhost;
 
     /**
-     * Connection timeout (in milliseconds)
+     * Connection timeout (in seconds)
+     *
+     * @var float
+     */
+    public float $timeout = 1;
+
+    /**
+     * Heartbeat interval (in seconds)
      *
      * @var int
      */
-    public $timeout = 1000;
-
-    /**
-     * Heartbeat interval (in milliseconds)
-     *
-     * @var int
-     */
-    public $heartbeat = 60000;
+    public int $heartbeat = 60;
 
     /**
      * @var int
      */
-    public $qosSize = 0;
+    public int $qosSize = 0;
 
     /**
      * @var int
      */
-    public $qosCount = 0;
+    public int $qosCount = 0;
 
     /**
      * @var bool
      */
-    public $qosGlobal = false;
+    public bool $qosGlobal = false;
 
     /**
      * @var bool
      */
-    public $tcpNoDelay = false;
+    public bool $tcpNoDelay = false;
 
     /**
      * @var int
      */
-    public $tcpAttempts = 2;
+    public int $tcpAttempts = 2;
 
     /**
      * @var int
      */
-    public $maxChannel = 0xFFFF;
+    public int $maxChannel = 0xFFFF;
 
     /**
      * @var int
      */
-    public $maxFrame = 0xFFFF;
+    public int $maxFrame = 0xFFFF;
 
     public function __construct(
         string $host = self::DEFAULT_HOST,

@@ -10,72 +10,25 @@
 
 namespace PHPinnacle\Ridge\Tests;
 
-use Amp\Loop;
-use function Amp\call;
+use PHPinnacle\Ridge\Client;
 
 abstract class AsyncTest extends RidgeTest
 {
-    /**
-     * @var string
-     */
-    private $realTestName;
+    protected Client $client;
 
-    /**
-     * @codeCoverageIgnore Invoked before code coverage data is being collected.
-     *
-     * @param string $name
-     */
-    public function setName(string $name): void
+    protected function setUp(): void
     {
-        parent::setName($name);
+        parent::setUp();
 
-        $this->realTestName = $name;
+        $this->client = self::client();
+
+        $this->client->connect();
     }
 
-    protected function runTest()
+    protected function tearDown(): void
     {
-        parent::setName('runTestAsync');
-
-        return parent::runTest();
-    }
-
-    protected function runTestAsync(...$args)
-    {
-        $return = null;
-
         try {
-            Loop::run(function () use (&$return, $args) {
-                $client = self::client();
-
-                yield $client->connect();
-
-                \array_unshift($args, $client);
-
-                $return = yield call([$this, $this->realTestName], ...$args);
-
-                yield $client->disconnect();
-
-                $info  = Loop::getInfo();
-                $count = $info['enabled_watchers']['referenced'];
-
-                if ($count !== 0) {
-                    $message = "Still have {$count} loop watchers.";
-
-                    foreach (['defer', 'delay', 'repeat', 'on_readable', 'on_writable'] as $key) {
-                        $message .= " {$key} - {$info[$key]['enabled']}.";
-                    }
-
-                    self::markTestIncomplete($message);
-
-                    Loop::stop();
-                }
-            });
-        } finally {
-            Loop::set((new Loop\DriverFactory)->create());
-
-            \gc_collect_cycles();
-        }
-
-        return $return;
+            $this->client->disconnect();
+        } catch (\Throwable $e) {}
     }
 }

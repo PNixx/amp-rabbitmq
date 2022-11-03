@@ -12,24 +12,12 @@ declare(strict_types=1);
 
 namespace PHPinnacle\Ridge;
 
-use function Amp\asyncCall;
+use function Amp\async;
 
 final class Events
 {
-    /**
-     * @var Channel
-     */
-    private $channel;
-
-    /**
-     * @var MessageReceiver
-     */
-    private $receiver;
-
-    public function __construct(Channel $channel, MessageReceiver $receiver)
+    public function __construct(private readonly Channel $channel, private readonly MessageReceiver $receiver)
     {
-        $this->channel = $channel;
-        $this->receiver = $receiver;
     }
 
     public function onAck(callable $listener): self
@@ -48,16 +36,13 @@ final class Events
 
     public function onReturn(callable $listener): self
     {
-        $this->receiver->onMessage(
-            function (Message $message) use ($listener) {
-                if (!$message->returned) {
-                    return;
-                }
-
-                /** @psalm-suppress MixedArgumentTypeCoercion */
-                asyncCall($listener, $message, $this->channel);
+        $this->receiver->onMessage(function (Message $message) use ($listener) {
+            if (!$message->returned) {
+                return;
             }
-        );
+
+            async(fn() => $listener($message, $this->channel));
+        });
 
         return $this;
     }
@@ -67,12 +52,8 @@ final class Events
      */
     private function onFrame(string $frame, callable $callback): void
     {
-        $this->receiver->onFrame(
-            $frame,
-            function (Protocol\AcknowledgmentFrame $frame) use ($callback) {
-                /** @psalm-suppress MixedArgumentTypeCoercion */
-                asyncCall($callback, $frame->deliveryTag, $frame->multiple, $this->channel);
-            }
-        );
+        $this->receiver->onFrame($frame, function (Protocol\AcknowledgmentFrame $frame) use ($callback) {
+            async(fn() => $callback($frame->deliveryTag, $frame->multiple, $this->channel));
+        });
     }
 }

@@ -12,55 +12,57 @@ declare(strict_types=1);
 
 namespace PHPinnacle\Ridge;
 
+use Amp\CancelledException;
+use Amp\Socket\ConnectException;
+use Amp\Socket\DnsSocketConnector;
+use Amp\Socket\RetrySocketConnector;
 use PHPinnacle\Ridge\Exception\ConnectionException;
-use function Amp\asyncCall, Amp\call, Amp\Socket\connect;
+use Revolt\EventLoop;
 use Amp\Socket\ConnectContext;
-use Amp\Loop;
-use Amp\Promise;
 use Amp\Socket\Socket;
 use PHPinnacle\Ridge\Protocol\AbstractFrame;
 
 final class Connection
 {
     /**
-     * @var string
-     */
-    private $uri;
-
-    /**
      * @var Parser
      */
-    private $parser;
+    private Parser $parser;
 
     /**
      * @var Socket|null
      */
-    private $socket;
+    private ?Socket $socket;
 
     /**
      * @var callable[][][]
-     * @psalm-var array<int, array<class-string<AbstractFrame>, array<int, callable>>>
+     * @psalm-var array<int, array<class-string<AbstractFrame>, array<string, callable>>>
      */
-    private $callbacks = [];
+    private array $callbacks = [];
 
     /**
      * @var int
      */
-    private $lastWrite = 0;
+    private int $lastWrite = 0;
 
     /**
      * @var int
      */
-    private $lastRead = 0;
+    private int $lastRead = 0;
+
+    /**
+     * @var \Closure|null
+     */
+    public ?\Closure $onClosed = null;
 
     /**
      * @var string|null
      */
-    private $heartbeatWatcherId;
+    private ?string $heartbeatWatcherId;
+    private ?string $read_loop;
 
-    public function __construct(string $uri)
+    public function __construct(private readonly string $uri)
     {
-        $this->uri = $uri;
         $this->parser = new Parser;
     }
 
@@ -70,29 +72,28 @@ final class Connection
     }
 
     /**
-     * @throws \PHPinnacle\Ridge\Exception\ConnectionException
+     * @throws ConnectionException
      */
-    public function write(Buffer $payload): Promise
+    public function write(Buffer $payload): void
     {
-        $this->lastWrite = Loop::now();
+        $this->lastWrite = time();
 
         if ($this->socket !== null) {
             try {
-                return $this->socket->write($payload->flush());
+                $this->socket->write($payload->flush());
             } catch (\Throwable $throwable) {
+                $this->close();
                 throw ConnectionException::writeFailed($throwable);
             }
         }
-
-        throw ConnectionException::socketClosed();
     }
 
     /**
-     * @throws \PHPinnacle\Ridge\Exception\ConnectionException
+     * @throws ConnectionException
      */
-    public function method(int $channel, Buffer $payload): Promise
+    public function method(int $channel, Buffer $payload): void
     {
-        return $this->write((new Buffer)
+        $this->write((new Buffer)
             ->appendUint8(1)
             ->appendUint16($channel)
             ->appendUint32($payload->size())
@@ -103,120 +104,136 @@ final class Connection
 
     /**
      * @psalm-param class-string<AbstractFrame> $frame
+     * @return string Callback position
      */
-    public function subscribe(int $channel, string $frame, callable $callback): void
+    public function subscribe(int $channel, string $frame, callable $callback): string
     {
-        $this->callbacks[$channel][$frame][] = $callback;
+        $id = uniqid();
+        $this->callbacks[$channel][$frame][$id] = $callback;
+        return $id;
     }
 
+    /**
+     * @param int $channel
+     * @param string $frame
+     * @param string $id
+     */
+    public function unsubscribe(int $channel, string $frame, string $id): void
+    {
+        unset($this->callbacks[$channel][$frame][$id]);
+    }
+
+    /**
+     * @param int $channel
+     */
     public function cancel(int $channel): void
     {
         unset($this->callbacks[$channel]);
     }
 
     /**
-     * @throws \PHPinnacle\Ridge\Exception\ConnectionException
+     * @throws ConnectionException
      */
-    public function open(int $timeout, int $maxAttempts, bool $noDelay): Promise
+    public function open(float $timeout, int $maxAttempts, bool $noDelay): void
     {
-        return call(
-            function () use ($timeout, $maxAttempts, $noDelay) {
-                $context = new ConnectContext();
 
-                if ($maxAttempts > 0) {
-                    $context = $context->withMaxAttempts($maxAttempts);
-                }
+        $context = new ConnectContext();
 
-                if ($timeout > 0) {
-                    $context = $context->withConnectTimeout($timeout);
-                }
+        if ($timeout > 0) {
+            $context = $context->withConnectTimeout($timeout);
+        }
 
-                if ($noDelay) {
-                    $context = $context->withTcpNoDelay();
-                }
+        if ($noDelay) {
+            $context = $context->withTcpNoDelay();
+        }
 
-                $this->socket = yield connect($this->uri, $context);
-                $this->lastRead = Loop::now();
+        try {
+            $connector = new RetrySocketConnector(new DnsSocketConnector(), $maxAttempts);
+            $this->socket = $connector->connect($this->uri, $context);
+            $this->lastRead = time();
 
-                asyncCall(
-                    function () {
-                        if ($this->socket === null) {
-                            throw ConnectionException::socketClosed();
-                        }
+            $this->read_loop = EventLoop::onReadable($this->socket->getResource(), function (): void {
+                $chunk = $this->socket->read();
+                if ($chunk !== null) {
+                    $this->parser->append($chunk);
 
-                        while (null !== $chunk = yield $this->socket->read()) {
-                            $this->parser->append($chunk);
-
-                            while ($frame = $this->parser->parse()) {
+                    $suspension = EventLoop::getSuspension();
+                    while ($frame = $this->parser->parse()) {
+                        EventLoop::defer(function () use ($frame, $suspension) {
+                            try {
                                 $class = \get_class($frame);
-                                $this->lastRead = Loop::now();
+                                $this->lastRead = time();
 
                                 /**
-                                 * @psalm-var callable(AbstractFrame):Promise<bool> $callback
+                                 * @psalm-var callable(AbstractFrame):bool $callback
                                  */
                                 foreach ($this->callbacks[(int)$frame->channel][$class] ?? [] as $i => $callback) {
-                                    if (yield call($callback, $frame)) {
+                                    if ($callback($frame)) {
                                         unset($this->callbacks[(int)$frame->channel][$class][$i]);
                                     }
                                 }
+                                $suspension->resume();
+                            } catch (\Throwable $e) {
+                                $suspension->throw($e);
                             }
-                        }
-
-                        $this->socket = null;
+                        });
+                        $suspension->suspend();
                     }
-                );
-            }
-        );
+                    unset($suspension);
+                }
+            });
+
+        } catch (ConnectException|CancelledException $e) {
+            throw ConnectionException::socketClosed($e);
+        }
     }
 
     public function heartbeat(int $interval): void
     {
-        $this->heartbeatWatcherId = Loop::repeat(
-            $interval,
-            function (string $watcherId) use ($interval){
-                $currentTime = Loop::now();
+        $this->heartbeatWatcherId = EventLoop::repeat($interval, function (string $watcherId) use ($interval): void {
+            $currentTime = time();
 
-                if (null !== $this->socket) {
-                    $lastWrite = $this->lastWrite ?: $currentTime;
+            if (null !== $this->socket) {
+                $lastWrite = $this->lastWrite ?: $currentTime;
 
-                    $nextHeartbeat = $lastWrite + $interval;
+                $nextHeartbeat = $lastWrite + $interval;
 
-                    if ($currentTime >= $nextHeartbeat) {
-                        yield $this->write((new Buffer)
-                            ->appendUint8(8)
-                            ->appendUint16(0)
-                            ->appendUint32(0)
-                            ->appendUint8(206)
-                        );
-                    }
-
-                    unset($lastWrite, $nextHeartbeat);
+                if ($currentTime >= $nextHeartbeat) {
+                    $this->write((new Buffer)
+                        ->appendUint8(8)
+                        ->appendUint16(0)
+                        ->appendUint32(0)
+                        ->appendUint8(206)
+                    );
                 }
 
-                if (
-                    0 !== $this->lastRead &&
-                    $currentTime > ($this->lastRead + $interval + 1000)
-                )
-                {
-                    Loop::cancel($watcherId);
-                }
+                unset($lastWrite, $nextHeartbeat);
+            }
 
-                unset($currentTime);
-            });
+            if ($this->lastRead !== 0 && $currentTime > ($this->lastRead + $interval + 1)) {
+                EventLoop::cancel($watcherId);
+            }
+
+            unset($currentTime);
+        });
     }
 
     public function close(): void
     {
         $this->callbacks = [];
 
-        if ($this->heartbeatWatcherId !== null) {
-            Loop::cancel($this->heartbeatWatcherId);
+        if ($this->read_loop) {
+            EventLoop::cancel($this->read_loop);
+            $this->read_loop = null;
+        }
+
+        if (!empty($this->heartbeatWatcherId)) {
+            EventLoop::cancel($this->heartbeatWatcherId);
 
             $this->heartbeatWatcherId = null;
         }
 
-        if ($this->socket !== null) {
-            $this->socket->close();
-        }
+        $this->socket?->close();
+        $this->socket = null;
     }
 }

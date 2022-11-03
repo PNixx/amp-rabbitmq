@@ -19,56 +19,56 @@ final class Message
      *
      * @var string
      */
-    public $content;
+    public string $content;
 
     /**
      * @psalm-readonly
      *
      * @var string
      */
-    public $exchange;
+    public string $exchange;
 
     /**
      * @psalm-readonly
      *
      * @var string
      */
-    public $routingKey;
+    public string $routingKey;
 
     /**
      * @psalm-readonly
      *
      * @var string|null
      */
-    public $consumerTag;
+    public ?string $consumerTag;
 
     /**
      * @psalm-readonly
      *
      * @var int|null
      */
-    public $deliveryTag;
+    public ?int $deliveryTag;
 
     /**
      * @psalm-readonly
      *
      * @var bool
      */
-    public $redelivered;
+    public bool $redelivered;
 
     /**
      * @psalm-readonly
      *
      * @var bool
      */
-    public $returned;
+    public bool $returned;
 
     /**
      * @psalm-readonly
      *
      * @var array
      */
-    public $headers;
+    public array $headers;
 
     public function __construct(
         string $content,
