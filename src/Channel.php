@@ -1157,7 +1157,12 @@ class Channel
     private function throwIfClosed(): void
     {
         if (in_array($this->state, [self::STATE_CLOSED, self::STATE_ERROR])) {
-            throw new ChannelException('Channel #' . $this->id . ' was closed');
+            try {
+                $this->cancellation()->throwIfRequested();
+                throw new ChannelException('Channel #' . $this->id . ' was closed, state: ' . $this->state);
+            } catch (CancelledException $e) {
+                throw new ChannelException('Channel #' . $this->id . ' was closed, state: ' . $this->state . ', cancelled: ' . $e->getPrevious()?->getMessage());
+            }
         }
     }
 
