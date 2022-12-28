@@ -39,7 +39,7 @@ class Channel
     /** Broker sends asynchronously 'basic.ack's for delivered messages. */
     private const MODE_CONFIRM = 3;
 
-    private const AWAIT_TIMEOUT = 30;
+    private const AWAIT_TIMEOUT = 300;
 
     /**
      * @var int
