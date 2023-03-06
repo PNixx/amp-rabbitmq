@@ -15,7 +15,7 @@ namespace PHPinnacle\Ridge;
 use Revolt\EventLoop;
 use Revolt\EventLoop\Suspension;
 
-final class Client
+class Client
 {
     public static string $product = 'Ridge';
 
