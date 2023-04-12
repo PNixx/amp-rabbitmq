@@ -409,6 +409,7 @@ class Channel
      */
     public function get(string $queue = '', bool $noAck = false): ?Message
     {
+        $this->throwIfClosed();
         static $getting = false;
 
         if ($getting) {
