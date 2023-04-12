@@ -385,6 +385,14 @@ class ChannelTest extends AsyncTest
         $deferred->getFuture()->await(new TimeoutCancellation(1));
     }
 
+    public function testGetWithoutQueue(): void
+    {
+        $this->expectException(ChannelException::class);
+        $channel = $this->client->channel();
+        $channel->get('get_test_not_exist', true);
+        $this->assertTrue($channel->isClosed());
+    }
+
     public function testGet(): void
     {
         $channel = $this->client->channel();

@@ -47,7 +47,7 @@ class ChannelParallelTest extends AsyncTest
 
         } finally {
             //Declare queue
-            for($i = 0; $i < $valid; $i++) {
+            for($i = 0; $i < $iterations; $i++) {
                 try {
                     $channel = $this->client->channel();
                     $channel->queueDelete('test' . $i);

@@ -29,7 +29,6 @@
     "amphp/phpunit-util": "^v3.0",
     "phpstan/phpstan": "^1.9"
   },
-  "minimum-stability": "beta",
   "prefer-stable": true,
   "autoload": {
     "psr-4": {

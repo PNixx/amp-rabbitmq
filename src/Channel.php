@@ -429,8 +429,14 @@ class Channel
             ->appendBits([$noAck])
             ->appendUint8(206),
             Protocol\BasicGetOkFrame::class,
-            Protocol\BasicGetEmptyFrame::class
+            Protocol\BasicGetEmptyFrame::class,
+            Protocol\ChannelCloseFrame::class,
         );
+
+        if ($frame instanceof Protocol\ChannelCloseFrame) {
+            $getting = false;
+            throw new ChannelException($frame->replyText, $frame->replyCode);
+        }
 
         if ($frame instanceof Protocol\BasicGetEmptyFrame) {
             $getting = false;
