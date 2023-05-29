@@ -91,6 +91,8 @@ class Channel
      */
     private int $deliveryTag = 0;
 
+		private static bool $getting = false;
+
     public function __construct(int $id, Connection $connection, Properties $properties)
     {
         $this->id = $id;
@@ -132,6 +134,7 @@ class Channel
      */
     public function open(string $outOfBand = ''): void
     {
+				self::$getting = false;
         if ($this->state !== self::STATE_READY) {
             throw Exception\ChannelException::notReady($this->id);
         }
@@ -175,6 +178,7 @@ class Channel
      */
     public function close(int $code = 0, string $reason = ''): void
     {
+				self::$getting = false;
         if ($this->state === self::STATE_CLOSED) {
             throw Exception\ChannelException::alreadyClosed($this->id);
         }
@@ -410,13 +414,12 @@ class Channel
     public function get(string $queue = '', bool $noAck = false): ?Message
     {
         $this->throwIfClosed();
-        static $getting = false;
 
-        if ($getting) {
+        if (self::$getting) {
             throw Exception\ChannelException::getInProgress();
         }
 
-        $getting = true;
+        self::$getting = true;
 
         /** @var Protocol\BasicGetOkFrame|Protocol\BasicGetEmptyFrame $frame */
         $frame = $this->write((new Buffer)
@@ -435,12 +438,12 @@ class Channel
         );
 
         if ($frame instanceof Protocol\ChannelCloseFrame) {
-            $getting = false;
+            self::$getting = false;
             throw new ChannelException($frame->replyText, $frame->replyCode);
         }
 
         if ($frame instanceof Protocol\BasicGetEmptyFrame) {
-            $getting = false;
+            self::$getting = false;
             return null;
         }
 
@@ -465,7 +468,7 @@ class Channel
             }
         }
 
-        $getting = false;
+        self::$getting = false;
         return new Message(
             $buffer->flush(),
             $frame->exchange,
