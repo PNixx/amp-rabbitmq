@@ -143,17 +143,21 @@ class Client
 
         $this->state = self::STATE_CONNECTED;
 
-        $this->connectionMonitorWatcherId = EventLoop::repeat(
-            self::CONNECTION_MONITOR_INTERVAL,
-            function (): void {
-                if ($this->connection->connected() === false) {
-                    $this->state = self::STATE_NOT_CONNECTED;
-                    $this->channels = [];
+        $this->connectionMonitorWatcherId = EventLoop::repeat(self::CONNECTION_MONITOR_INTERVAL, function (): void {
+            if ($this->connection->connected() === false) {
+                $this->connection->close();
 
+                $this->disableConnectionMonitor();
+                $this->channels = [];
+                $this->state = self::STATE_NOT_CONNECTED;
+
+                if( $this->connection->onClosed ) {
+                    call_user_func($this->connection->onClosed, 'Monitor watcher disconnected');
+                } else {
                     throw Exception\ClientException::disconnected('Monitor watcher disconnected');
                 }
             }
-        );
+        });
     }
 
     /**
