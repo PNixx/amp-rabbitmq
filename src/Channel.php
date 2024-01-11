@@ -91,7 +91,7 @@ class Channel
      */
     private int $deliveryTag = 0;
 
-		private static bool $getting = false;
+    private static bool $getting = false;
 
     public function __construct(int $id, Connection $connection, Properties $properties)
     {
@@ -111,7 +111,7 @@ class Channel
 
     public function isClosed(): bool
     {
-        return in_array($this->state, [self::STATE_CLOSING, self::STATE_CLOSED, self::STATE_ERROR]);
+        return in_array($this->state, [self::STATE_CLOSING, self::STATE_CLOSED, self::STATE_ERROR]) || !$this->connection->connected();
     }
 
     public function id(): int
@@ -134,7 +134,7 @@ class Channel
      */
     public function open(string $outOfBand = ''): void
     {
-				self::$getting = false;
+        self::$getting = false;
         if ($this->state !== self::STATE_READY) {
             throw Exception\ChannelException::notReady($this->id);
         }
@@ -178,7 +178,7 @@ class Channel
      */
     public function close(int $code = 0, string $reason = ''): void
     {
-				self::$getting = false;
+        self::$getting = false;
         if ($this->state === self::STATE_CLOSED) {
             throw Exception\ChannelException::alreadyClosed($this->id);
         }
@@ -260,7 +260,7 @@ class Channel
         $flags = [$noLocal, $noAck, $exclusive, $noWait];
 
         //Subscribe before send request
-        if( $consumerTag ) {
+        if ($consumerTag) {
             $this->consumer->subscribe($consumerTag, $callback);
         }
 
@@ -274,7 +274,7 @@ class Channel
             ->appendTable($arguments);
 
         if ($noWait) {
-            if( empty($consumerTag) ) {
+            if (empty($consumerTag)) {
                 throw new ProtocolException('Consumer tag can\'t be null with no wait flag');
             }
             $this->method($payload);
@@ -667,7 +667,7 @@ class Channel
             ->appendBits([$noWait])
             ->appendTable($arguments);
 
-        if( $noWait ) {
+        if ($noWait) {
             $this->method($buffer);
         } else {
             $this->method($buffer, Protocol\QueueBindOkFrame::class);
@@ -699,7 +699,7 @@ class Channel
             ->appendString($routingKey)
             ->appendTable($arguments);
 
-        if( $noWait ) {
+        if ($noWait) {
             $this->method($buffer);
         } else {
             $this->method($buffer, Protocol\QueueUnbindOkFrame::class);
@@ -848,7 +848,7 @@ class Channel
             ->appendBits([$noWait])
             ->appendTable($arguments);
 
-        if( $noWait) {
+        if ($noWait) {
             $this->method($buffer);
         } else {
             $this->method($buffer, Protocol\ExchangeBindOkFrame::class);
@@ -881,7 +881,7 @@ class Channel
             ->appendBits([$noWait])
             ->appendTable($arguments);
 
-        if( $noWait ) {
+        if ($noWait) {
             $this->method($buffer);
         } else {
             $this->method($buffer, Protocol\ExchangeUnbindOkFrame::class);
@@ -1199,7 +1199,7 @@ class Channel
             }
         } catch (CancelledException $e) {
             $this->connection->onClosed = null;
-            if( $e->getPrevious() instanceof ChannelException ) {
+            if ($e->getPrevious() instanceof ChannelException) {
                 throw $e->getPrevious();
             }
             throw new ProtocolException($e->getMessage() . ($e->getPrevious() ? '. ' . $e->getPrevious()->getMessage() : '') . '. Wait frames: ' . implode(', ', $frames ?: []));

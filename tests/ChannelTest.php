@@ -32,7 +32,7 @@ class ChannelTest extends AsyncTest
 
         $channel->open();
 
-        $this->assertTrue(true);
+        $this->assertTrue(!$channel->isClosed());
     }
 
     public function testClose(): void
@@ -41,7 +41,7 @@ class ChannelTest extends AsyncTest
 
         $channel->close();
 
-        $this->assertTrue(true);
+        $this->assertTrue($channel->isClosed());
     }
 
     public function testCloseAlreadyClosedChannel(): void

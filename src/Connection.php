@@ -16,6 +16,7 @@ use Amp\CancelledException;
 use Amp\Socket\ConnectException;
 use Amp\Socket\DnsSocketConnector;
 use Amp\Socket\RetrySocketConnector;
+use PHPinnacle\Ridge\Exception\ClientException;
 use PHPinnacle\Ridge\Exception\ConnectionException;
 use Revolt\EventLoop;
 use Amp\Socket\ConnectContext;
@@ -78,7 +79,9 @@ final class Connection
     {
         $this->lastWrite = time();
 
-        if ($this->socket !== null) {
+        if ($this->socket === null) {
+            throw ClientException::notConnected();
+        } else {
             try {
                 $this->socket->write($payload->flush());
             } catch (\Throwable $throwable) {
