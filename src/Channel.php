@@ -1171,7 +1171,7 @@ class Channel
                 $this->cancellation()->throwIfRequested();
                 throw new ChannelException('Channel #' . $this->id . ' was closed, state: ' . $this->state);
             } catch (CancelledException $e) {
-                throw new ChannelException('Channel #' . $this->id . ' was closed, state: ' . $this->state . ', cancelled: ' . $e->getPrevious()?->getMessage());
+                throw new ChannelException('Channel #' . $this->id . ' was closed, state: ' . $this->state . ', cancelled: ' . $e->getPrevious()?->getMessage(), 0, $e->getPrevious());
             }
         }
     }
