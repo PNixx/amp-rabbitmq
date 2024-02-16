@@ -1,21 +1,19 @@
-# PHPinnacle Ridge
+# AMQP for AMPHP V3
 
 [![Latest Version on Packagist][ico-version]][link-packagist]
 [![Software License][ico-license]](LICENSE.md)
-![Continuous Integration](https://github.com/phpinnacle/ridge/workflows/Continuous%20Integration/badge.svg)
-[![Shepherd](https://shepherd.dev/github/phpinnacle/ridge/coverage.svg)](https://shepherd.dev/github/phpinnacle/ridge)
 [![Total Downloads][ico-downloads]][link-downloads]
 
 This library is a pure asynchronous PHP implementation of the AMQP 0-9-1 protocol.
 
-Code is mostly based on [bunnyphp](https://github.com/jakubkulhan/bunny), but use [amphp](https://amphp.org) for async operations.
+Code is mostly based on [bunnyphp](https://github.com/jakubkulhan/bunny) and [PHPinnacle Ridge](https://github.com/phpinnacle/ridge), but use [amphp](https://amphp.org) for async operations.
 
 ## Install
 
 Via Composer
 
 ```bash
-$ composer require phpinnacle/ridge
+$ composer require pnixx/amp-rabbitmq
 ```
 
 ## Basic Usage
@@ -75,22 +73,18 @@ If you discover any security related issues, please email dev@phpinnacle.com ins
 
 ## Credits
 
-- [PHPinnacle][link-author]
+- [PNixx][link-author]
 - [All Contributors][link-contributors]
 
 ## License
 
 The MIT License (MIT). Please see [License File](LICENSE.md) for more information.
 
-[ico-version]: https://img.shields.io/packagist/v/phpinnacle/ridge.svg?style=flat-square
+[ico-version]: https://img.shields.io/packagist/v/pnixx/amp-rabbitmq.svg?style=flat-square
 [ico-license]: https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square
-[ico-scrutinizer]: https://img.shields.io/scrutinizer/coverage/g/phpinnacle/ridge.svg?style=flat-square
-[ico-code-quality]: https://img.shields.io/scrutinizer/g/phpinnacle/ridge.svg?style=flat-square
-[ico-downloads]: https://img.shields.io/packagist/dt/phpinnacle/ridge.svg?style=flat-square
+[ico-downloads]: https://img.shields.io/packagist/dt/pnixx/amp-rabbitmq.svg?style=flat-square
 
-[link-packagist]: https://packagist.org/packages/phpinnacle/ridge
-[link-scrutinizer]: https://scrutinizer-ci.com/g/phpinnacle/ridge/code-structure
-[link-code-quality]: https://scrutinizer-ci.com/g/phpinnacle/ridge
-[link-downloads]: https://packagist.org/packages/phpinnacle/ridge
-[link-author]: https://github.com/phpinnacle
+[link-packagist]: https://packagist.org/packages/pnixx/amp-rabbitmq
+[link-downloads]: https://packagist.org/packages/pnixx/amp-rabbitmq
+[link-author]: https://github.com/PNixx
 [link-contributors]: ../../contributors

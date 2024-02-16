@@ -1,19 +1,27 @@
 {
-  "name": "phpinnacle/ridge",
+  "name": "pnixx/amp-rabbitmq",
   "type": "library",
-  "description": "PHPinnacle async AMQP client",
+  "description": "Async AMQP client",
   "keywords": [
     "phpinnacle",
     "async",
-    "amqp"
+    "amqp",
+    "amphp",
+    "amphpv3"
   ],
-  "homepage": "https://github.com/phpinnacle/ridge",
+  "homepage": "https://github.com/PNixx/amp-rabbitmq",
   "license": "MIT",
   "authors": [
     {
       "name": "PHPinnacle",
       "email": "dev@phpinnacle.com",
       "homepage": "https://phpinnacle.com",
+      "role": "Developer"
+    },
+    {
+      "name": "Sergey Odintsov",
+      "email": "nixx.dj@gmail.com",
+      "homepage": "https://github.com/PNixx",
       "role": "Developer"
     }
   ],
