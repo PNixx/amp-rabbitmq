@@ -96,7 +96,8 @@ class Client
         $this->connection->open(
             $this->config->timeout,
             $this->config->tcpAttempts,
-            $this->config->tcpNoDelay
+            $this->config->tcpNoDelay,
+            $this->config->options
         );
 
         $buffer = new Buffer;
@@ -114,32 +115,36 @@ class Client
         $this->connectionOpen();
 
         //Subscribe to close frame
-        $this->connection->subscribe(0, Protocol\ConnectionCloseFrame::class, function (Protocol\ConnectionCloseFrame $frame) {
-            try {
-                $buffer = new Buffer;
-                $buffer
-                    ->appendUint8(1)
-                    ->appendUint16(0)
-                    ->appendUint32(4)
-                    ->appendUint16(10)
-                    ->appendUint16(51)
-                    ->appendUint8(206);
+        $this->connection->subscribe(
+            0,
+            Protocol\ConnectionCloseFrame::class,
+            function (Protocol\ConnectionCloseFrame $frame) {
+                try {
+                    $buffer = new Buffer;
+                    $buffer
+                        ->appendUint8(1)
+                        ->appendUint16(0)
+                        ->appendUint32(4)
+                        ->appendUint16(10)
+                        ->appendUint16(51)
+                        ->appendUint8(206);
 
-                $this->connection->write($buffer);
-            } catch (Exception\ConnectionException $e) {
+                    $this->connection->write($buffer);
+                } catch (Exception\ConnectionException $e) {
+                }
+                $this->connection->close();
+
+                $this->disableConnectionMonitor();
+                $this->channels = [];
+                $this->state = self::STATE_NOT_CONNECTED;
+
+                if ($this->connection->onClosed) {
+                    call_user_func($this->connection->onClosed, $frame->replyText);
+                } else {
+                    throw Exception\ClientException::disconnected($frame->replyText);
+                }
             }
-            $this->connection->close();
-
-            $this->disableConnectionMonitor();
-            $this->channels = [];
-            $this->state = self::STATE_NOT_CONNECTED;
-
-            if( $this->connection->onClosed ) {
-                call_user_func($this->connection->onClosed, $frame->replyText);
-            } else {
-                throw Exception\ClientException::disconnected($frame->replyText);
-            }
-        });
+        );
 
         $this->state = self::STATE_CONNECTED;
 
@@ -151,7 +156,7 @@ class Client
                 $this->channels = [];
                 $this->state = self::STATE_NOT_CONNECTED;
 
-                if( $this->connection->onClosed ) {
+                if ($this->connection->onClosed) {
                     call_user_func($this->connection->onClosed, 'Monitor watcher disconnected');
                 } else {
                     throw Exception\ClientException::disconnected('Monitor watcher disconnected');
@@ -245,10 +250,10 @@ class Client
      */
     private function connectionStart(): void
     {
-
         $start = $this->await(Protocol\ConnectionStartFrame::class);
 
-        if (!\str_contains($start->mechanisms, 'AMQPLAIN')) {
+        $loginMethod = $this->config->options['login_method'] ?? 'AMQPLAIN';
+        if (!\str_contains($start->mechanisms, $loginMethod)) {
             throw Exception\ClientException::notSupported($start->mechanisms);
         }
 
@@ -257,9 +262,9 @@ class Client
         $buffer = new Buffer;
         $buffer
             ->appendTable([
-                'LOGIN' => $this->config->user,
-                'PASSWORD' => $this->config->pass,
-            ])
+                              'LOGIN' => $this->config->user,
+                              'PASSWORD' => $this->config->pass,
+                          ])
             ->discard(4);
 
         $frameBuffer = new Buffer;
@@ -267,7 +272,7 @@ class Client
             ->appendUint16(10)
             ->appendUint16(11)
             ->appendTable(['product' => Client::$product, 'platform' => 'PHP ' . (phpversion() ?: 'N/A')])
-            ->appendString('AMQPLAIN')
+            ->appendString($loginMethod)
             ->appendText((string)$buffer)
             ->appendString('en_US');
 
@@ -399,14 +404,21 @@ class Client
     {
         /** @psalm-var Suspension<T> $suspension */
         $suspension = EventLoop::getSuspension();
-        $timeout = EventLoop::delay($this->config->timeout, static fn() => $suspension->throw(new Exception\ClientException('Frame wait timeout')));
-        $this->connection->subscribe(0, $frame, static function (Protocol\AbstractFrame $frame) use ($timeout, $suspension) {
-            EventLoop::cancel($timeout);
-            /** @psalm-var T $frame */
-            $suspension->resume($frame);
+        $timeout = EventLoop::delay(
+            $this->config->timeout,
+            static fn() => $suspension->throw(new Exception\ClientException('Frame wait timeout'))
+        );
+        $this->connection->subscribe(
+            0,
+            $frame,
+            static function (Protocol\AbstractFrame $frame) use ($timeout, $suspension) {
+                EventLoop::cancel($timeout);
+                /** @psalm-var T $frame */
+                $suspension->resume($frame);
 
-            return true;
-        });
+                return true;
+            }
+        );
 
         return $suspension->suspend();
     }
@@ -414,7 +426,6 @@ class Client
     private function disableConnectionMonitor(): void
     {
         if ($this->connectionMonitorWatcherId !== null) {
-
             EventLoop::cancel($this->connectionMonitorWatcherId);
 
             $this->connectionMonitorWatcherId = null;

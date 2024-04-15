@@ -26,6 +26,17 @@ class ClientConnectTest extends RidgeTest
         $client->disconnect();
     }
 
+    public function testConnectWithTls(): void
+    {
+        $client = self::clientWithTls();
+
+        $client->connect();
+
+        self::assertTrue($client->isConnected());
+
+        $client->disconnect();
+    }
+
     public function testConnectFailure()
     {
         self::expectException(ConnectionException::class);

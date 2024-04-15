@@ -21,12 +21,35 @@ abstract class RidgeTest extends AsyncTestCase
      */
     protected static function client(): Client
     {
-        if(!$dsn = \getenv('RIDGE_TEST_DSN'))
-        {
+        if (!$dsn = \getenv('RIDGE_TEST_DSN')) {
             self::markTestSkipped('No test dsn! Please set RIDGE_TEST_DSN environment variable.');
         }
 
         $config = Config::parse($dsn);
+
+        return new Client($config);
+    }
+
+    protected static function clientWithTls(): Client
+    {
+        if (!$dsn = \getenv('RIDGE_TEST_DSN')) {
+            self::markTestSkipped('No test dsn! Please set RIDGE_TEST_DSN environment variable.');
+        }
+
+        $options = [
+            'login_method' => 'EXTERNAL',
+            'ssl'          => [
+                'peer_name'        => '',
+                'cafile'           => '',
+                'local_cert'       => '',
+                'local_pk'         => '',
+                'verify_peer'      => true,
+                'verify_peer_name' => true
+            ]
+        ];
+
+        $config = Config::parse($dsn);
+        $config->options = $options;
 
         return new Client($config);
     }
