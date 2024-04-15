@@ -13,9 +13,12 @@ declare(strict_types=1);
 namespace PHPinnacle\Ridge;
 
 use Amp\CancelledException;
+use Amp\Socket\Certificate;
+use Amp\Socket\ClientTlsContext;
 use Amp\Socket\ConnectException;
 use Amp\Socket\DnsSocketConnector;
 use Amp\Socket\RetrySocketConnector;
+use Amp\Socket\SocketException;
 use PHPinnacle\Ridge\Exception\ClientException;
 use PHPinnacle\Ridge\Exception\ConnectionException;
 use Revolt\EventLoop;
@@ -96,12 +99,13 @@ final class Connection
      */
     public function method(int $channel, Buffer $payload): void
     {
-        $this->write((new Buffer)
-            ->appendUint8(1)
-            ->appendUint16($channel)
-            ->appendUint32($payload->size())
-            ->append($payload)
-            ->appendUint8(206)
+        $this->write(
+            (new Buffer)
+                ->appendUint8(1)
+                ->appendUint16($channel)
+                ->appendUint32($payload->size())
+                ->append($payload)
+                ->appendUint8(206)
         );
     }
 
@@ -134,12 +138,44 @@ final class Connection
         unset($this->callbacks[$channel]);
     }
 
+    private function applyTlsToContext(ConnectContext $context, array $tlsOptions): ConnectContext
+    {
+        if (empty($tlsOptions)) {
+            return $context;
+        }
+
+        $defaultPeerName = parse_url($this->uri)['host'] ?? '';
+        $clientTlsContext = new ClientTlsContext($tlsOptions['peer_name'] ?? $defaultPeerName);
+
+        if (!empty($tlsOptions['cafile'])) {
+            $clientTlsContext = $clientTlsContext->withCaFile($tlsOptions['cafile']);
+        }
+
+        if (!empty($tlsOptions['capath'])) {
+            $clientTlsContext = $clientTlsContext->withCaPath($tlsOptions['capath']);
+        }
+
+        if (boolval($tlsOptions['verify_peer'] ?? true) === false) {
+            $clientTlsContext = $clientTlsContext->withoutPeerVerification();
+        }
+
+        if (!empty($tlsOptions['local_cert'])) {
+            $certificate = new Certificate(
+                $tlsOptions['local_cert'],
+                $tlsOptions['local_pk'] ?? null,
+                $tlsOptions['passphrase'] ?? null
+            );
+            $clientTlsContext = $clientTlsContext->withCertificate($certificate);
+        }
+
+        return $context->withTlsContext($clientTlsContext);
+    }
+
     /**
      * @throws ConnectionException
      */
-    public function open(float $timeout, int $maxAttempts, bool $noDelay): void
+    public function open(float $timeout, int $maxAttempts, bool $noDelay, array $options): void
     {
-
         $context = new ConnectContext();
 
         if ($timeout > 0) {
@@ -150,9 +186,16 @@ final class Connection
             $context = $context->withTcpNoDelay();
         }
 
+        $context = $this->applyTlsToContext($context, $options['ssl'] ?? []);
+
         try {
             $connector = new RetrySocketConnector(new DnsSocketConnector(), $maxAttempts);
             $this->socket = $connector->connect($this->uri, $context);
+
+            if ($context->getTlsContext() !== null) {
+                $this->socket->setupTls();
+            }
+
             $this->lastRead = time();
 
             $this->read_loop = EventLoop::onReadable($this->socket->getResource(), function (): void {
@@ -185,8 +228,7 @@ final class Connection
                     unset($suspension);
                 }
             });
-
-        } catch (ConnectException|CancelledException $e) {
+        } catch (SocketException|ConnectException|CancelledException $e) {
             throw ConnectionException::socketClosed($e);
         }
     }
@@ -202,11 +244,12 @@ final class Connection
                 $nextHeartbeat = $lastWrite + $interval;
 
                 if ($currentTime >= $nextHeartbeat) {
-                    $this->write((new Buffer)
-                        ->appendUint8(8)
-                        ->appendUint16(0)
-                        ->appendUint32(0)
-                        ->appendUint8(206)
+                    $this->write(
+                        (new Buffer)
+                            ->appendUint8(8)
+                            ->appendUint16(0)
+                            ->appendUint32(0)
+                            ->appendUint8(206)
                     );
                 }
 

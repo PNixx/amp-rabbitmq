@@ -96,18 +96,25 @@ final class Config
      */
     public int $maxFrame = 0xFFFF;
 
+    /**
+     * @var array
+     */
+    public array $options = [];
+
     public function __construct(
         string $host = self::DEFAULT_HOST,
-        int $port = self::DEFAULT_PORT,
+        int    $port = self::DEFAULT_PORT,
         string $user = self::DEFAULT_USER,
         string $pass = self::DEFAULT_PASS,
-        string $vhost = null
+        string $vhost = null,
+        array  $options = []
     ) {
         $this->host = $host;
         $this->port = $port;
         $this->user = $user;
         $this->pass = $pass;
         $this->vhost = $vhost ?: self::DEFAULT_VHOST;
+        $this->options = $options;
     }
 
     /**
