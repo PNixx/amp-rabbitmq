@@ -198,8 +198,11 @@ final class Connection
 
             $this->lastRead = time();
 
-            $this->read_loop = EventLoop::onReadable($this->socket->getResource(), function (): void {
+            $this->read_loop = EventLoop::onReadable($this->socket->getResource(), function ($callbackId): void {
+                EventLoop::disable($callbackId);
                 $chunk = $this->socket->read();
+                EventLoop::enable($callbackId);
+
                 if ($chunk !== null) {
                     $this->parser->append($chunk);
 
