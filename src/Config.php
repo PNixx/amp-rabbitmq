@@ -101,7 +101,7 @@ final class Config
         int $port = self::DEFAULT_PORT,
         string $user = self::DEFAULT_USER,
         string $pass = self::DEFAULT_PASS,
-        string $vhost = null
+        string $vhost = self::DEFAULT_VHOST
     ) {
         $this->host = $host;
         $this->port = $port;
